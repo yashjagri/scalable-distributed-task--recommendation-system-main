@@ -38,3 +38,6 @@ if __name__ == "__main__":
 
 # One-time setup script that applies the schema.sql to postgres
 # also opens a session and runs all four repos and inserts test data
+
+
+

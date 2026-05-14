@@ -1,0 +1,75 @@
+import asyncio
+import json
+from datetime import datetime
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from aiokafka import AIOKafkaProducer
+from aiokafka.errors import KafkaError
+
+from . import config, schemas
+
+app = FastAPI(title="Event Ingest API")
+
+
+@app.on_event("startup")
+async def startup_event():
+    app.state.producer = None
+    app.state.producer_ready = False
+    try:
+        producer = AIOKafkaProducer(
+            bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS,
+            client_id=config.KAFKA_CLIENT_ID,
+            acks="all",
+        )
+        await producer.start()
+        app.state.producer = producer
+        app.state.producer_ready = True
+    except Exception:
+        pass
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    producer = getattr(app.state, "producer", None)
+    if producer:
+        await producer.flush()
+        await producer.stop()
+
+
+@app.post("/events", response_model=schemas.EventOut, status_code=202)
+async def ingest_event(event_in: schemas.EventIn, request: Request):
+    producer = getattr(app.state, "producer", None)
+    if producer is None or not getattr(app.state, "producer_ready", False):
+        raise HTTPException(status_code=503, detail="Producer not ready")
+
+    event_id_str = str(event_in.event_id) if event_in.event_id else str(uuid4())
+    ingest_ts = datetime.utcnow().isoformat() + "Z"
+
+    enriched = {
+        "event_id": event_id_str,
+        "user_id": event_in.user_id,
+        "item_id": event_in.item_id,
+        "event_type": event_in.event_type.value,
+        "metadata": event_in.metadata or {},
+        "ingest_ts": ingest_ts,
+    }
+    message_bytes = json.dumps(enriched).encode("utf-8")
+    key_bytes = event_id_str.encode("utf-8")
+
+    for attempt in range(1, config.PRODUCER_MAX_RETRIES + 1):
+        try:
+            await producer.send_and_wait(
+                config.KAFKA_TOPIC,
+                value=message_bytes,
+                key=key_bytes,
+                timeout=config.PRODUCER_OPERATION_TIMEOUT_SECONDS,
+            )
+            return JSONResponse(status_code=202, content={"event_id": event_id_str, "status": "accepted"})
+        except (KafkaError, asyncio.TimeoutError):
+            if attempt == config.PRODUCER_MAX_RETRIES:
+                break
+            await asyncio.sleep(config.PRODUCER_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+
+    raise HTTPException(status_code=503, detail="Failed to publish event")
