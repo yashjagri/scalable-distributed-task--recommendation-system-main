@@ -8,15 +8,18 @@ from fastapi.responses import JSONResponse
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaError
 
+#FastAPI is the web framework, HTTPExcpetion is how you return error responses, Request gives you acsess to request headers
+#Kafka producer sends messages to kafka and kafka error is the exception type to catch when kafka fails
+
 from . import config, schemas
 
-app = FastAPI(title="Event Ingest API")
+app = FastAPI(title = 'Event Ingest API') #creates the FASTAPI application instance
 
-
-@app.on_event("startup")
+@app.on_event("startup") #one time startup function
 async def startup_event():
     app.state.producer = None
     app.state.producer_ready = False
+    #defensive programming, offering an attribute to kafka even if the connection fails
     try:
         producer = AIOKafkaProducer(
             bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS,
@@ -24,11 +27,15 @@ async def startup_event():
             acks="all",
         )
         await producer.start()
+        # use async and await calls when you are calling something external to the system
+        #in this case its just the FastAPI endpoints we are calling
         app.state.producer = producer
         app.state.producer_ready = True
     except Exception:
         pass
 
+#this function, when started, created a kafka producer and connects to kafka
+#acks = all means that kafka wont confirm receipt until all brokers have the message
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -37,8 +44,9 @@ async def shutdown_event():
         await producer.flush()
         await producer.stop()
 
+# this runs when the server is stopping
 
-@app.post("/events", response_model=schemas.EventOut, status_code=202)
+@app.post("/events", response_model=schemas.EventOut, status_code=202) #/events registers this function to handle POST /events. EventOut shape is used here to validate the shape of incoming requests
 async def ingest_event(event_in: schemas.EventIn, request: Request):
     producer = getattr(app.state, "producer", None)
     if producer is None or not getattr(app.state, "producer_ready", False):
@@ -56,7 +64,9 @@ async def ingest_event(event_in: schemas.EventIn, request: Request):
         "ingest_ts": ingest_ts,
     }
     message_bytes = json.dumps(enriched).encode("utf-8")
+# this converts dicts to bytes since kafka only accpts bytes
     key_bytes = event_id_str.encode("utf-8")
+# this code builds the enriched dict from the validated EventIn feilds plust the server-added ingest_ts
 
     for attempt in range(1, config.PRODUCER_MAX_RETRIES + 1):
         try:
@@ -73,3 +83,6 @@ async def ingest_event(event_in: schemas.EventIn, request: Request):
             await asyncio.sleep(config.PRODUCER_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
 
     raise HTTPException(status_code=503, detail="Failed to publish event")
+
+# ^ this is the actual endpoint, checks if the producedr is ready, generates an event id if there isnt one, builds enriched dict
+# then searlizes to JSON bytes and publishes to kafka

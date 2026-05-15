@@ -35,4 +35,3 @@ class RecommendationsResponse(BaseModel):
 
 #These are pydantic models and they define the shape of the HTTP request and response bodies
 #Pydantic allows you to bypass __init__. Takes care of the __init__, validation, serialization, and error messages.
-#
